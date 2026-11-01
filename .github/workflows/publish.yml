@@ -90,6 +90,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      # The upstream tarball is fetched separately; this checkout is for this
+      # repository's own files — the licences that ship in the image.
+      - uses: actions/checkout@v5
       - name: Fetch upstream source at the tag
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
