@@ -1,0 +1,41 @@
+# Notices for Rulerbench
+
+Rulerbench is an unofficial, self-hosted container packaging of **ScanRuler**.
+
+- ScanRuler: <https://github.com/CNCKitchen/scanruler> — Copyright (c) Stefan
+  Hermann / CNC Kitchen, licensed **AGPL-3.0-only** (`LICENSE`).
+- This repository adds a `Dockerfile`, an nginx configuration and CI. It does
+  not patch, brand or alter the upstream application: the image contains an
+  unmodified build of an upstream release, and the exact upstream version and
+  commit are recorded in every image's labels
+  (`org.opencontainers.image.version`, `io.rulerbench.upstream.version`,
+  `io.rulerbench.upstream.commit`).
+
+Because ScanRuler is AGPL-3.0, so is this packaging, and so is the running
+service: **the complete corresponding source of any image published here is
+this repository plus the upstream release named in its labels**, both public
+and both downloadable. If you modify the app and serve it to anyone else, you
+inherit the same obligation.
+
+## Trademarks
+
+The name "ScanRuler", "CNC Kitchen" and the CNC Kitchen logo are trademarks of
+their owner and are **not** licensed under the AGPL; upstream's `COMMERCIAL.md`
+asks forks to use a different name. This packaging is therefore named
+**Rulerbench** and is not affiliated with, endorsed by or supported by CNC
+Kitchen. The application's own interface still shows its upstream identity,
+because the build is unmodified — that is attribution, not a claim of
+authorship.
+
+## Third-party components inside the app
+
+| Component | Licence | Where |
+| --- | --- | --- |
+| ScanRuler | AGPL-3.0-only | the whole app |
+| Open CASCADE Technology (OCCT) via `occt-wasm` | LGPL-2.1 **with the Open CASCADE exception** | loaded by the Reverse engineer workspace as a separate, replaceable `.wasm` file under `/assets/` — its notice travels in `licences/` |
+| Barlow, Barlow Semi Condensed, B612 Mono | SIL Open Font License 1.1 | `/fonts/` in the built app |
+| three.js, React, manifold-3d, meshoptimizer, fflate, zustand, meshStep | MIT / Apache-2.0 / ISC as their own `package.json` states | bundled into the app |
+
+The OCCT exception and the OFL both survive packaging: nothing here
+relicenses them, and the OCCT WASM file is shipped as its own file so it can
+be replaced — which is what the exception requires.

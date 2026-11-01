@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Nothing from the upstream checkout belongs in the packaging build context:
+# whether a build uses the from-source Dockerfile (context = upstream source) or
+# the release Dockerfile (context = this repository) is decided by the caller,
+# but a stray node_modules or dist from your machine must never be baked in.
+**/node_modules
+**/dist
+**/dist-engine
+**/.git
+**/e2e-out
+**/tests
+*.log
+.DS_Store

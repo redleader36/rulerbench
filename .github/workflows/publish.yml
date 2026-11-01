@@ -1,0 +1,277 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Watches upstream ScanRuler for a new release and publishes the matching
+# container image. One workflow does the whole cycle, because a token pushed by
+# GITHUB_TOKEN does not trigger other workflows:
+#
+#   resolve  — newest upstream release vs. this repository's VERSION file
+#   dist     — build the app once, natively (static output: same bytes any arch)
+#   publish  — multi-arch image to GHCR, then commit VERSION, tag, release
+#
+# Every image is traceable: labels carry the upstream version and commit, and
+# the release attaches the complete corresponding source (AGPL-3.0 §6/§13).
+name: Publish
+
+on:
+  schedule:
+    # Daily. Upstream releases several times a week, so a day's lag is the
+    # point where "synced" still feels true; the dispatch button covers "now".
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream tag to build (empty: newest release; use e.g. v0.9.4)'
+        required: false
+        type: string
+      force:
+        description: 'Rebuild and republish even if VERSION already matches'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  UPSTREAM_REPO: CNCKitchen/scanruler
+  IMAGE: ghcr.io/${{ github.repository }}
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      commit: ${{ steps.pick.outputs.commit }}
+      build: ${{ steps.pick.outputs.build }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: pick
+        env:
+          WANT: ${{ inputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ -n "${WANT:-}" ]; then
+            tag="$WANT"
+          else
+            # releases/latest honours "which one is marked latest", so a
+            # pre-release the project has not blessed is not picked up by a
+            # scheduled run; fall back to tags only if no release exists.
+            tag=$(curl -fsSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/latest" \
+              | jq -r '.tag_name // empty' || true)
+            [ -n "$tag" ] || tag=$(curl -fsSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/tags?per_page=1" \
+              | jq -r '.[0].name // empty')
+          fi
+          case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+          version="${tag#v}"
+          commit=$(curl -fsSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/git/ref/tags/${tag}" \
+            | jq -r '.object.sha // empty')
+          if [ -z "$commit" ]; then
+            echo "::error::upstream tag ${tag} does not exist"
+            exit 1
+          fi
+          have=$(cat VERSION 2>/dev/null | tr -d '[:space:]' || true)
+          build=false
+          if [ "$version" != "$have" ] || [ "${FORCE:-false}" = "true" ]; then build=true; fi
+          echo "upstream newest: ${version} (${commit}); built so far: ${have:-none}; building: ${build}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "commit=${commit}"    >> "$GITHUB_OUTPUT"
+          echo "build=${build}"      >> "$GITHUB_OUTPUT"
+
+  dist:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Fetch upstream source at the tag
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p src
+          curl -fsSL "https://github.com/${{ env.UPSTREAM_REPO }}/archive/refs/tags/v${VERSION}.tar.gz" \
+            | tar -xz -C src --strip-components=1
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+      - name: Build (npm ci, then tsc + vite — upstream's own commands)
+        working-directory: src
+        env:
+          # Repository variable, so the short-link file store can be pointed at
+          # your own host without editing this workflow. Unset: upstream's.
+          VITE_FILES_URL: ${{ vars.VITE_FILES_URL || 'https://files.scanruler.com/' }}
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Assemble the image build context
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+          rm -rf out && mkdir -p out/licences
+          cp -r src/dist out/dist
+          # Every licence the shipped bytes are under, and the provenance.
+          cp "${{ github.workspace }}/LICENSE" out/licences/LICENSE
+          cp "${{ github.workspace }}/NOTICE"  out/licences/NOTICE
+          cp src/LICENSE                       out/licences/LICENSE-upstream
+          jq -n --arg v "$VERSION" --arg c "$COMMIT" --arg r "${{ env.UPSTREAM_REPO }}" \
+            '{project:"ScanRuler", repo:("https://github.com/" + $r), version:$v, commit:$c,
+              packaged_as:"rulerbench"}' > out/licences/UPSTREAM.json
+          echo "--- built tree ---"
+          du -sh out/dist
+          ls out/dist
+          test -f out/dist/index.html
+      - name: Keep the source the image corresponds to
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The build context build.sh would make, minus caches: this is the
+          # "complete corresponding source" the release attaches.
+          rm -rf source && cp -r src source
+          rm -rf source/.git source/node_modules
+          cp "${{ github.workspace }}/Dockerfile" "${{ github.workspace }}/nginx.conf" \
+             "${{ github.workspace }}/NOTICE" source/
+          tar -czf "rulerbench-${VERSION}-source.tar.gz" source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rulerbench-dist
+          path: |
+            out/
+            rulerbench-*-source.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
+  publish:
+    needs: [resolve, dist]
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: rulerbench-dist
+      - name: Flatten the build context
+        run: |
+          set -euo pipefail
+          # The artifact keeps the workspace-relative paths it was uploaded
+          # with; Dockerfile.release wants dist/ and licences/ at the root.
+          mv out/* .
+          rmdir out
+          ls -la
+
+      - uses: docker/setup-buildx-action@v3
+      # No QEMU: every stage of Dockerfile.release is a COPY, so the arm64
+      # image needs no emulated execution at all.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.release
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          build-args: |
+            VERSION=${{ needs.resolve.outputs.version }}
+            UPSTREAM_VERSION=${{ needs.resolve.outputs.version }}
+            UPSTREAM_COMMIT=${{ needs.resolve.outputs.commit }}
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.resolve.outputs.version }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            io.rulerbench.upstream.version=${{ needs.resolve.outputs.version }}
+            io.rulerbench.upstream.commit=${{ needs.resolve.outputs.commit }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the image that was just pushed
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 8080:8080 "${{ env.IMAGE }}:${VERSION}"
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ || true)
+            [ "$code" = "200" ] && break
+            sleep 1
+          done
+          set -x
+          curl -fsS http://127.0.0.1:8080/healthz
+          curl -fsS -o /dev/null -w 'index: %{http_code}\n' http://127.0.0.1:8080/
+          # A deep link has to land on the app, not a 404.
+          curl -fsS -o /dev/null -w 'spa fallback: %{http_code}\n' http://127.0.0.1:8080/some/deep/link
+          # The WASM CAD kernel must be served as application/wasm.
+          wasm=$(docker exec smoke sh -c 'ls /usr/share/nginx/html/assets/*.wasm 2>/dev/null | head -1' || true)
+          if [ -n "$wasm" ]; then
+            curl -fsSI "http://127.0.0.1:8080/assets/$(basename "$wasm")" | grep -i 'content-type'
+          else
+            echo "note: no .wasm file at the top of assets/ (may be nested)"
+          fi
+          docker rm -f smoke
+
+      - name: Record the version, tag it, and write the release
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          notes=$(curl -fsSL "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/tags/v${VERSION}" \
+            | jq -r '.body // ""' || true)
+          {
+            echo "Container image of **ScanRuler ${VERSION}** — unmodified upstream source, packaged as \`rulerbench\`."
+            echo
+            echo '```'
+            echo "docker pull ${{ env.IMAGE }}:${VERSION}"
+            echo "docker run -d --name rulerbench -p 8080:8080 ${{ env.IMAGE }}:${VERSION}"
+            echo '```'
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Upstream release | https://github.com/${{ env.UPSTREAM_REPO }}/releases/tag/v${VERSION} |"
+            echo "| Upstream commit | \`${COMMIT}\` |"
+            echo "| Platforms | \`${PLATFORMS}\` |"
+            echo "| Image digest | \`${DIGEST}\` |"
+            echo "| Licence | AGPL-3.0-only — corresponding source in \`rulerbench-${VERSION}-source.tar.gz\` |"
+            echo
+            echo "Published automatically by \`.github/workflows/publish.yml\`. Upstream release notes follow, unedited."
+            echo
+            echo '---'
+            echo
+            printf '%s\n' "$notes"
+          } > release-notes.md
+
+          git config user.name  "rulerbench-bot"
+          git config user.email "rulerbench-bot@users.noreply.github.com"
+          echo "$VERSION" > VERSION
+          git add VERSION
+          git commit -m "Upstream ${VERSION} (${COMMIT:0:12})" || echo "nothing to commit"
+          git tag -f "v${VERSION}"
+          git push origin HEAD:main
+          git push -f origin "v${VERSION}"
+
+          gh release create "v${VERSION}" \
+            --title "Rulerbench ${VERSION}" \
+            --notes-file release-notes.md \
+            --target main \
+            "rulerbench-${VERSION}-source.tar.gz" 2>/dev/null || \
+          gh release edit "v${VERSION}" --notes-file release-notes.md

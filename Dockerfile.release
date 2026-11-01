@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# CI-only variant of the Dockerfile: it packages a `dist/` that was already
+# built by the release workflow on a native amd64 runner.
+#
+# Why: Vite's output is static files whose bytes do not depend on the build
+# host's architecture, so the same dist can be served on amd64 and arm64. Doing
+# it this way keeps `npm ci` + `tsc` off QEMU, where it would take twenty
+# minutes and fail interestingly instead of correctly.
+#
+# The from-source Dockerfile is the documented one; this produces the very same
+# runtime image from the same bytes.
+
+FROM nginxinc/nginx-unprivileged:1.27-alpine
+
+ARG VERSION=dev
+ARG UPSTREAM_COMMIT=unknown
+ARG UPSTREAM_VERSION=unknown
+LABEL org.opencontainers.image.title="rulerbench" \
+      org.opencontainers.image.description="Self-hosted ScanRuler build, packaged as a container (unmodified upstream source)" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.source="https://github.com/redleader36/rulerbench" \
+      org.opencontainers.image.url="https://github.com/CNCKitchen/scanruler" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.revision="${UPSTREAM_COMMIT}" \
+      io.rulerbench.upstream.version="${UPSTREAM_VERSION}" \
+      io.rulerbench.upstream.commit="${UPSTREAM_COMMIT}"
+
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# dist/ — the built app.  licences/ — everything the shipped bytes are under.
+COPY dist /usr/share/nginx/html
+COPY licences /usr/share/doc/rulerbench
+
+USER 101
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+  CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
+
+STOPSIGNAL SIGQUIT
