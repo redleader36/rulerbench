@@ -178,7 +178,10 @@ jobs:
           rmdir out
           cp nginx.conf ctx/
           cp Dockerfile.release ctx/Dockerfile
-          ls -laR ctx | head -20
+          ls -la ctx
+          du -sh ctx/dist
+          test -f ctx/dist/index.html
+          test -f ctx/licences/NOTICE
 
       - uses: docker/setup-buildx-action@v3
       # No QEMU: every stage of Dockerfile.release is a COPY, so the arm64
