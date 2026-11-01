@@ -29,16 +29,12 @@ browser, and the container serves static files and nothing else. It needs no dat
 volume, no outbound network access at runtime, and holds no state — a scan session lives
 in the browser (checkpointed to IndexedDB) and in the `.scanruler` project files you save.
 
-`docker compose`:
+`docker compose` — [`compose.yml`](compose.yml) is in the repository and adds
+`read_only` plus `no-new-privileges`, both of which this image runs happily under
+(it writes nothing but nginx's own temp files, which a `tmpfs` covers):
 
-```yaml
-services:
-  rulerbench:
-    image: ghcr.io/redleader36/rulerbench:latest
-    container_name: rulerbench
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
+```bash
+docker compose up -d
 ```
 
 Pin a version rather than `latest` if you care what you get on a restart —
